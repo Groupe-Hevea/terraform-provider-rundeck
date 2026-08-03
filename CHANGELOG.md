@@ -6,6 +6,10 @@
 
 - **Added `node_intersect` to a job reference's `node_filters` `dispatch` block** - Rundeck's "Match Node Filter Intersection" setting (`jobref.nodefilters.dispatch.nodeIntersect`) had no equivalent in the provider, so a referenced job configured this way always ran on its own node set instead of the intersection with the calling job's. The setting is now settable and round-trips on read. Note that Rundeck honors `nodeIntersect` even when the reference sets no `filter` — it is the only `dispatch` field read independently of one — so a `dispatch` block carrying nothing but `node_intersect` is a valid configuration.
 
+- **Added `values_list_delimiter` to job options** - Rundeck stores an option's predefined choices as a single delimited string plus the delimiter used to split it (`Option.toMap` always emits `valuesListDelimiter` alongside `values`, defaulting it to a comma). The provider had no way to set it, so a choice containing a comma could not be represented — the option silently split into the wrong values. Distinct from the existing `multi_value_delimiter`, which separates the values a user selects rather than the ones offered.
+
+- **Added `notify_avg_duration_threshold` to `rundeck_job`** - The threshold that decides when the `on_avg_duration` notification fires (a duration, a percentage of the job's average duration, or an increment over it). Without it Rundeck reads the threshold as zero and the guard `jobAverageDurationFinal > 0` never passes, so an `on_avg_duration` notification was configured but could never fire.
+
 ## 1.3.1
 
 **Bug Fixes**
