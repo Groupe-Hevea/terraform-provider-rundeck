@@ -1,3 +1,27 @@
+## Build interne Allopneus
+
+Cette branche n'est pas un fork divergent : c'est la `master` amont augmentée des
+correctifs que nous avons proposés, publiés sous le namespace `Groupe-Hevea` en
+attendant qu'ils soient intégrés en amont.
+
+| Apport | PR amont |
+|---|---|
+| `node_intersect` sur les références de job | [#284](https://github.com/rundeck/terraform-provider-rundeck/pull/284) |
+| `values_list_delimiter` et `notify_avg_duration_threshold` | [#285](https://github.com/rundeck/terraform-provider-rundeck/pull/285) |
+| ciblage du job par `uuid` à l'update | [#286](https://github.com/rundeck/terraform-provider-rundeck/pull/286) |
+| ressource `rundeck_system_execution_mode` | [#287](https://github.com/rundeck/terraform-provider-rundeck/pull/287) |
+
+Les versions portent un suffixe `-allopneus.N`, qui les distingue sans risque de
+collision avec une version amont. Ce sont des préversions au sens semver : elles
+ne sont donc jamais retenues par une contrainte de plage, et doivent être
+épinglées explicitement dans `required_providers`.
+
+Quand l'amont aura publié ces changements, repasser sur `rundeck/rundeck` :
+retirer l'épinglage, puis `terraform state replace-provider` de
+`registry.terraform.io/Groupe-Hevea/rundeck` vers `registry.terraform.io/rundeck/rundeck`.
+
+---
+
 ## Unreleased
 
 **Enhancements**
