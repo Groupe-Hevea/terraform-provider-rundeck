@@ -22,6 +22,10 @@
 
   The update payload now carries `uuid`, so Rundeck takes its UUID-first resolution path and the job is targeted unambiguously. **Behaviour change:** renaming a job now renames it in place and succeeds, where it previously failed after creating a duplicate. Duplicates left behind by the previous behaviour are not cleaned up automatically — Terraform no longer references them, so they have to be removed from Rundeck by hand. `group_name` and `project_name` are unaffected: both carry `RequiresReplace`, so changing either already destroys and recreates the job.
 
+### System Execution Mode Resource
+
+- **Added `rundeck_system_execution_mode`** - Controls whether a server executes jobs (`active` / `passive`), the switch used during migrations and maintenance windows. Rundeck exposes this over the API (`system/executions/{status,enable,disable}`) but the provider had no way to reach it, so the mode could only be set through the `rundeck.executionMode` property — which is read at startup only, meaning a change required a restart and any manual switch went unnoticed until the next one. Managing it as a resource makes the intended mode explicit and surfaces out-of-band changes as drift. Removing the resource leaves the server untouched rather than flipping its mode.
+
 ## 1.3.1
 
 **Bug Fixes**
