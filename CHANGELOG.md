@@ -10,6 +10,7 @@ attendant qu'ils soient intégrés en amont.
 | `values_list_delimiter` et `notify_avg_duration_threshold` | [#285](https://github.com/rundeck/terraform-provider-rundeck/pull/285) |
 | ciblage du job par `uuid` à l'update | [#286](https://github.com/rundeck/terraform-provider-rundeck/pull/286) |
 | ressource `rundeck_system_execution_mode` | [#287](https://github.com/rundeck/terraform-provider-rundeck/pull/287) |
+| `step_plugin` / `node_step_plugin` sur un `error_handler` | à proposer |
 
 Les versions portent un suffixe `-allopneus.N`, qui les distingue sans risque de
 collision avec une version amont. Ce sont des préversions au sens semver : elles
@@ -37,6 +38,12 @@ retirer l'épinglage, puis `terraform state replace-provider` de
 **Bug Fixes**
 
 ### Job Resource
+
+- **Fixed a plugin-based `error_handler` being silently discarded** - The schema accepts `step_plugin` and `node_step_plugin` under `error_handler`, and `errorHandlerObjectType` declares both, but neither conversion handled them: the write side emitted only `description`, the script/command fields and `jobref`, and the read side never looked for `type`/`configuration`. A handler such as `flow-control` therefore serialized to an object carrying no action at all. Rundeck accepted the job and dropped the handler, so the read-back returned no block and the apply failed with `error_handler: block count changed from 1 to 0`.
+
+  The plan being perfectly valid, this only ever surfaced at apply time — and the job was left in Rundeck without its handler, so a workflow meant to stop on a condition simply ran on. Both directions now carry `type`, `configuration` and `nodeStep`, the latter telling a workflow step from a node step (Rundeck answers it as a bool or as the string `"true"`, both accepted).
+
+  Note that Rundeck itself refuses a workflow-step handler on a node-oriented workflow (*"Error Handlers for Node Steps must also be Node Steps"*), so a job guarded this way needs `strategy = "sequential"`.
 
 - **Fixed updates being resolved by name instead of UUID, which created duplicate jobs** - On update the provider sent the job's UUID under `id`, but Rundeck writes a job's UUID out under both `uuid` and `id` (`ScheduledExecution.toMap`) while only reading it back from `uuid` (`fromMap`). The identifier therefore never reached the import, and Rundeck fell back to resolving the job by name + group + project — a fallback that only matches when *exactly one* job carries that name (`1 == schedlist.size()` in `loadImportedJobs`).
 
