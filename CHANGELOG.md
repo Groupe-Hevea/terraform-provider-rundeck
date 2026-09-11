@@ -1,3 +1,46 @@
+## Build interne Allopneus
+
+Cette branche n'est pas un fork divergent : c'est la `main` amont augmentée des
+correctifs que nous avons proposés, publiés sous le namespace `Groupe-Hevea` en
+attendant qu'ils soient intégrés en amont.
+
+| Apport | PR amont |
+|---|---|
+| `uuid` configurable sur `rundeck_job` | à proposer |
+| `group_name` déplace le job au lieu de le remplacer | [#301](https://github.com/rundeck/terraform-provider-rundeck/pull/301) |
+
+Les apports précédents (#284 à #288) sont intégrés en amont depuis la **v1.4.0 du
+27 août 2026**. Cette build repart donc de la `main` amont et ne conserve aucun
+correctif local hormis ceux ci-dessus.
+
+> **`1.5.0-allopneus.1` et `.2` sont à proscrire.** Une revue adverse y a trouvé,
+> sur chacun des deux apports, un chemin de perte de données : l'épinglage d'un
+> UUID sur un état antérieur à l'attribut planifiait le remplacement de tous les
+> jobs, et un update de groupe pouvait suivre silencieusement un doublon. Les deux
+> sont corrigés en `.3`.
+
+Les versions portent un suffixe `-allopneus.N`, qui les distingue sans risque de
+collision avec une version amont. Ce sont des préversions au sens semver : elles
+ne sont donc jamais retenues par une contrainte de plage, et doivent être
+épinglées explicitement dans `required_providers` :
+
+```hcl
+terraform {
+  required_providers {
+    rundeck = {
+      source  = "Groupe-Hevea/rundeck"
+      version = "1.5.0-allopneus.3"
+    }
+  }
+}
+```
+
+Quand l'amont aura publié ces changements, repasser sur `rundeck/rundeck` :
+retirer l'épinglage, puis `terraform state replace-provider` de
+`registry.terraform.io/Groupe-Hevea/rundeck` vers `registry.terraform.io/rundeck/rundeck`.
+
+---
+
 ## Unreleased
 
 **Enhancements**
