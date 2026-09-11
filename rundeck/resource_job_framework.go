@@ -197,12 +197,12 @@ func (r *jobResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 				Required:    true,
 				Description: "Job name",
 			},
+			// No RequiresReplace: the update resolves the job by uuid, so the group
+			// no longer takes part in identifying it and Rundeck moves the job.
+			// project_name still replaces, its lookup being scoped to a project.
 			"group_name": schema.StringAttribute{
 				Optional:    true,
-				Description: "Job group name",
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
+				Description: "Job group name. Changing it moves the job; leave it unset for the project root.",
 			},
 			"project_name": schema.StringAttribute{
 				Required:    true,

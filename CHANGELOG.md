@@ -7,10 +7,11 @@ attendant qu'ils soient intégrés en amont.
 | Apport | PR amont |
 |---|---|
 | `uuid` configurable sur `rundeck_job` | à proposer |
+| `group_name` déplace le job au lieu de le remplacer | à proposer |
 
 Les apports précédents (#284 à #288) sont intégrés en amont depuis la **v1.4.0 du
 27 août 2026**. Cette build repart donc de la `main` amont et ne conserve aucun
-correctif local hormis celui ci-dessus.
+correctif local hormis ceux ci-dessus.
 
 Les versions portent un suffixe `-allopneus.N`, qui les distingue sans risque de
 collision avec une version amont. Ce sont des préversions au sens semver : elles
@@ -22,13 +23,13 @@ terraform {
   required_providers {
     rundeck = {
       source  = "Groupe-Hevea/rundeck"
-      version = "1.5.0-allopneus.1"
+      version = "1.5.0-allopneus.2"
     }
   }
 }
 ```
 
-Quand l'amont aura publié ce changement, repasser sur `rundeck/rundeck` :
+Quand l'amont aura publié ces changements, repasser sur `rundeck/rundeck` :
 retirer l'épinglage, puis `terraform state replace-provider` de
 `registry.terraform.io/Groupe-Hevea/rundeck` vers `registry.terraform.io/rundeck/rundeck`.
 
@@ -47,6 +48,15 @@ retirer l'épinglage, puis `terraform state replace-provider` de
   Setting `uuid` to the value a job already has plans as no change, so an existing estate can be pinned in place without recreating anything. Changing a `uuid` that is already set replaces the job, since Rundeck cannot renumber one in place; the plan shows the replacement and the provider warns, because the references that break live outside Terraform's state. Removing `uuid` from a configuration is not a change — the job keeps the UUID it has.
 
   Two consequences worth noting. Rundeck constrains job UUIDs to be unique across the whole instance rather than per project (`ScheduledExecution.uuid(unique: true)`), so a colliding apply fails instead of creating a duplicate. And because `Create` sends `dupeOption=create`, re-applying against a job that already carries a pinned UUID now errors rather than silently creating a second job with a new UUID, as it did when the state was lost.
+- **Changing `group_name` now moves the job instead of replacing it** - `group_name` carried `RequiresReplace`, so reorganising jobs into different groups destroyed and recreated each one, losing its UUID and its execution history along the way.
+
+  That constraint dated from when the update resolved the job by name + group + project: moving a job broke the resolution, and replacing it was the defensive answer. Since the update targets the job by the UUID held in state, the group takes no part in identifying it — `findByUuidAndProject` looks the job up by uuid and project alone — and the group in the payload is simply applied. `name` was already in this position and renames have worked in place since then; the group is the same case.
+
+  `project_name` keeps `RequiresReplace`: that lookup *is* scoped to a project, so moving a job across projects still has to recreate it.
+
+  Removing `group_name` from a configuration moves the job back to the project root. The payload omits the field, and Rundeck reads it back as `se.groupPath = data['group'] ? data['group'] : null` (`ScheduledExecution.fromMap`), so an absent group clears it.
+
+  **Behaviour change:** a plan that previously showed a job being destroyed and recreated now shows an in-place update. Jobs keep their UUID, so `jobref` references by UUID and documentation links survive a reorganisation, as does the execution history.
 
 ## 1.4.0
 
