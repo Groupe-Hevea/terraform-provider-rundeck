@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"testing"
@@ -84,16 +85,12 @@ func TestAccJob_groupNameMovesInPlace(t *testing.T) {
 		if err != nil {
 			return fmt.Errorf("error getting test client: %s", err)
 		}
-		if _, err := runJob(clients, jobUUID); err != nil {
-			return fmt.Errorf("could not run the job to give it an execution history: %s", err)
-		}
-		executionsBefore, err = jobExecutionIDs(clients, jobUUID)
+		executionID, err := testRunJob(clients, jobUUID)
 		if err != nil {
-			return fmt.Errorf("could not list executions: %s", err)
+			return fmt.Errorf("could not run the job to give it an execution history: %s "+
+				"(a server left in passive execution mode refuses to run jobs)", err)
 		}
-		if len(executionsBefore) == 0 {
-			return fmt.Errorf("job has no execution after being run, so the history check below would prove nothing")
-		}
+		executionsBefore = []string{executionID}
 		return nil
 	}
 
@@ -102,6 +99,9 @@ func TestAccJob_groupNameMovesInPlace(t *testing.T) {
 			rs, ok := s.RootModule().Resources["rundeck_job.test"]
 			if !ok {
 				return fmt.Errorf("rundeck_job.test not found in state")
+			}
+			if jobUUID == "" {
+				return fmt.Errorf("no job captured: this check needs a prior step to record the job and its executions")
 			}
 			if rs.Primary.ID != jobUUID {
 				return fmt.Errorf("job id changed across the move: %s -> %s (the job was replaced instead of moved)",
@@ -118,10 +118,13 @@ func TestAccJob_groupNameMovesInPlace(t *testing.T) {
 				return fmt.Errorf("could not read job back: %s", err)
 			}
 			if job.Group != wantGroup {
-				return fmt.Errorf("group server-side = %q, want %q (the job did not move)", job.Group, wantGroup)
+				return fmt.Errorf("group server-side = %q, want %q", job.Group, wantGroup)
 			}
 
-			after, err := jobExecutionIDs(clients, jobUUID)
+			if len(executionsBefore) == 0 {
+				return fmt.Errorf("no executions recorded before the move, so the history check would prove nothing")
+			}
+			after, err := testJobExecutionIDs(clients, jobUUID)
 			if err != nil {
 				return fmt.Errorf("could not list executions: %s", err)
 			}
@@ -144,102 +147,100 @@ func TestAccJob_groupNameMovesInPlace(t *testing.T) {
 		CheckDestroy:             testAccJobCheckDestroy(),
 		Steps: []resource.TestStep{
 			{
-				Config: testAccJobConfig_groupBefore,
+				Config: testAccJobConfig_group(`group_name        = "reorg/before"`),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr("rundeck_job.test", "group_name", "reorg/before"),
 					captureAndGiveItHistory,
+					requireMovedInPlace("reorg/before"),
 				),
 			},
 			{
-				Config: testAccJobConfig_groupAfter,
+				Config: testAccJobConfig_group(`group_name        = "reorg/after"`),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckResourceAttr("rundeck_job.test", "group_name", "reorg/after"),
 					requireMovedInPlace("reorg/after"),
 				),
 			},
 			{
+				Config:   testAccJobConfig_group(`group_name        = "reorg/after"`),
+				PlanOnly: true,
+			},
+			{
 				// group_name absent from the configuration: the job goes back to
 				// the project root, still without being replaced.
-				Config: testAccJobConfig_groupCleared,
+				Config: testAccJobConfig_group(""),
 				Check: resource.ComposeTestCheckFunc(
 					resource.TestCheckNoResourceAttr("rundeck_job.test", "group_name"),
 					requireMovedInPlace(""),
 				),
 			},
 			{
-				Config:   testAccJobConfig_groupCleared,
+				Config:   testAccJobConfig_group(""),
 				PlanOnly: true,
 			},
 		},
 	})
 }
 
-// runJob starts the job and returns the id of the execution Rundeck recorded.
-func runJob(clients *RundeckClients, jobID string) (string, error) {
-	url := fmt.Sprintf("%s/api/%s/job/%s/run", clients.BaseURL, clients.APIVersion, jobID)
-
-	req, err := http.NewRequest("POST", url, nil)
-	if err != nil {
-		return "", err
+// testRunJob starts the job and returns the id of the execution Rundeck recorded.
+func testRunJob(clients *RundeckClients, jobID string) (string, error) {
+	resp, err := clients.V2.JobsAPI.ApiJobRun(clients.ctx, jobID).Execute()
+	if resp != nil {
+		defer resp.Body.Close()
 	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Rundeck-Auth-Token", clients.Token)
-
-	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("running job %s: %w", jobID, err)
 	}
-	defer resp.Body.Close()
+
+	body, readErr := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("running job %s returned status %d: %s", jobID, resp.StatusCode, testTruncate(body))
+	}
+	if readErr != nil {
+		return "", fmt.Errorf("reading run response: %w", readErr)
+	}
 
 	var execution struct {
 		ID int `json:"id"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&execution); err != nil {
-		return "", fmt.Errorf("decoding run response (status %d): %w", resp.StatusCode, err)
+	if err := json.Unmarshal(body, &execution); err != nil {
+		return "", fmt.Errorf("decoding run response %s: %w", testTruncate(body), err)
 	}
-	if resp.StatusCode != http.StatusOK || execution.ID == 0 {
-		return "", fmt.Errorf("run returned status %d with execution id %d", resp.StatusCode, execution.ID)
+	if execution.ID == 0 {
+		return "", fmt.Errorf("run response carried no execution id: %s", testTruncate(body))
 	}
 	return strconv.Itoa(execution.ID), nil
 }
 
-// jobExecutionIDs lists every execution Rundeck holds for the job.
-func jobExecutionIDs(clients *RundeckClients, jobID string) ([]string, error) {
-	url := fmt.Sprintf("%s/api/%s/job/%s/executions", clients.BaseURL, clients.APIVersion, jobID)
-
-	req, err := http.NewRequest("GET", url, nil)
+// testJobExecutionIDs lists every execution Rundeck holds for the job.
+func testJobExecutionIDs(clients *RundeckClients, jobID string) ([]string, error) {
+	list, err := clients.V1.JobExecutionList(clients.ctx, jobID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("listing executions of job %s: %w", jobID, err)
 	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Rundeck-Auth-Token", clients.Token)
-
-	resp, err := (&http.Client{}).Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var body struct {
-		Executions []struct {
-			ID int `json:"id"`
-		} `json:"executions"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, fmt.Errorf("decoding executions response (status %d): %w", resp.StatusCode, err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("listing executions returned status %d", resp.StatusCode)
+	if list.Executions == nil {
+		return nil, nil
 	}
 
-	ids := make([]string, 0, len(body.Executions))
-	for _, e := range body.Executions {
-		ids = append(ids, strconv.Itoa(e.ID))
+	ids := make([]string, 0, len(*list.Executions))
+	for _, e := range *list.Executions {
+		if e.ID != nil {
+			ids = append(ids, strconv.Itoa(int(*e.ID)))
+		}
 	}
 	return ids, nil
 }
 
-const testAccJobConfig_groupProject = `
+func testTruncate(body []byte) string {
+	const max = 512
+	if len(body) > max {
+		return string(body[:max]) + "…"
+	}
+	return string(body)
+}
+
+func testAccJobConfig_group(groupLine string) string {
+	return fmt.Sprintf(`
 resource "rundeck_project" "test" {
   name        = "terraform-acc-test-job-group-move"
   description = "Test project for moving a job between groups"
@@ -251,42 +252,16 @@ resource "rundeck_project" "test" {
     }
   }
 }
-`
 
-const testAccJobConfig_groupBefore = testAccJobConfig_groupProject + `
 resource "rundeck_job" "test" {
   project_name      = rundeck_project.test.name
   name              = "job-to-move"
-  group_name        = "reorg/before"
+  %s
   description       = "Job that will be moved between groups"
   execution_enabled = true
   command {
     shell_command = "echo hello"
   }
 }
-`
-
-const testAccJobConfig_groupAfter = testAccJobConfig_groupProject + `
-resource "rundeck_job" "test" {
-  project_name      = rundeck_project.test.name
-  name              = "job-to-move"
-  group_name        = "reorg/after"
-  description       = "Job that will be moved between groups"
-  execution_enabled = true
-  command {
-    shell_command = "echo hello"
-  }
+`, groupLine)
 }
-`
-
-const testAccJobConfig_groupCleared = testAccJobConfig_groupProject + `
-resource "rundeck_job" "test" {
-  project_name      = rundeck_project.test.name
-  name              = "job-to-move"
-  description       = "Job that will be moved between groups"
-  execution_enabled = true
-  command {
-    shell_command = "echo hello"
-  }
-}
-`
