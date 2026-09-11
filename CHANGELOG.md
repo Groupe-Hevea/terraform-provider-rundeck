@@ -8,9 +8,11 @@
 
   `uuid` is `Optional` + `Computed`: left unset it is read back from the server exactly as before, so existing configurations are unaffected and no state migration is needed. Set, it must be a canonical lowercase UUID and travels in the payload's `uuid` field — the one Rundeck reads back on import (`ScheduledExecution.fromMap`) and the one `uuidOption=preserve` acts on.
 
-  Setting `uuid` to the value a job already has plans as no change, so an existing estate can be pinned in place without recreating anything. Changing a `uuid` that is already set replaces the job, since Rundeck cannot renumber one in place; the plan shows the replacement and the provider warns, because the references that break live outside Terraform's state. Removing `uuid` from a configuration is not a change — the job keeps the UUID it has.
+  Setting `uuid` to the value a job already has plans as no change, so an existing estate can be pinned in place without recreating anything — including on state written before this attribute existed, where the job's UUID is recorded under `id` alone and is compared against that. Changing a `uuid` that is already set replaces the job, since Rundeck cannot renumber one in place; the plan shows the replacement and the provider warns alongside it, because the references that break live outside Terraform's state. Removing `uuid` from a configuration is not a change — the job keeps the UUID it has.
 
-  Two consequences worth noting. Rundeck constrains job UUIDs to be unique across the whole instance rather than per project (`ScheduledExecution.uuid(unique: true)`), so a colliding apply fails instead of creating a duplicate. And because `Create` sends `dupeOption=create`, re-applying against a job that already carries a pinned UUID now errors rather than silently creating a second job with a new UUID, as it did when the state was lost.
+  Rundeck constrains job UUIDs to be unique across the whole instance rather than per project (`ScheduledExecution.uuid(unique: true)`), and `Create` sends `dupeOption=create`, so creating a job whose pinned UUID is already taken fails instead of silently creating a duplicate under a fresh UUID. That can happen after a lost state file, or under `create_before_destroy` while the job being replaced still holds the UUID; the error now says so and points at `terraform import`.
+
+  A pinned UUID that Rundeck does not honour is reported as such rather than surfacing as `Provider produced inconsistent result after apply`, and the job is still recorded in state so it is not orphaned.
 
 ## 1.4.0
 

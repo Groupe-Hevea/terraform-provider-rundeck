@@ -2,6 +2,7 @@ package rundeck
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"testing"
 
@@ -70,20 +71,33 @@ func TestCanonicalUUIDPattern(t *testing.T) {
 	}
 }
 
-// The behavioural test: a configured uuid must be the job's actual UUID in
-// Rundeck, and stay so across a re-apply.
+// TestAccJob_configuredUUIDIsPreserved covers the three things a pinned uuid
+// promises: Rundeck honours it on create, an update keeps the job under it, and
+// changing it replaces the job.
 func TestAccJob_configuredUUIDIsPreserved(t *testing.T) {
-	const want = "8c1d4e2a-7b93-4f61-95c8-2e0a6d3f7b14"
+	pinned, replacement := randomJobUUID(t), randomJobUUID(t)
 
-	requireJobID := func(want string) resource.TestCheckFunc {
+	requireJobID := func(want *string) resource.TestCheckFunc {
 		return func(s *terraform.State) error {
 			rs, ok := s.RootModule().Resources["rundeck_job.test"]
 			if !ok {
 				return fmt.Errorf("rundeck_job.test not found in state")
 			}
-			if rs.Primary.ID != want {
-				return fmt.Errorf("job id = %s, want %s (Rundeck did not preserve the configured uuid)",
-					rs.Primary.ID, want)
+			if rs.Primary.ID != *want {
+				return fmt.Errorf("job id = %s, want %s (Rundeck did not honour the configured uuid)",
+					rs.Primary.ID, *want)
+			}
+
+			clients, err := getTestClients()
+			if err != nil {
+				return fmt.Errorf("error getting test client: %s", err)
+			}
+			job, err := GetJobJSON(clients.V1, *want)
+			if err != nil {
+				return fmt.Errorf("job %s could not be read back from Rundeck: %s", *want, err)
+			}
+			if got := jobIdentity(job.UUID, job.ID); got != *want {
+				return fmt.Errorf("uuid in Rundeck = %s, want %s", got, *want)
 			}
 			return nil
 		}
@@ -95,21 +109,55 @@ func TestAccJob_configuredUUIDIsPreserved(t *testing.T) {
 		CheckDestroy:             testAccJobCheckDestroy(),
 		Steps: []resource.TestStep{
 			{
-				Config: testAccJobConfig_settableUUID,
+				Config: testAccJobConfig_settableUUID(pinned, "Job whose identity comes from the configuration"),
 				Check: resource.ComposeTestCheckFunc(
-					resource.TestCheckResourceAttr("rundeck_job.test", "uuid", want),
-					requireJobID(want),
+					resource.TestCheckResourceAttr("rundeck_job.test", "uuid", pinned),
+					requireJobID(&pinned),
 				),
 			},
 			{
-				Config:   testAccJobConfig_settableUUID,
+				Config:   testAccJobConfig_settableUUID(pinned, "Job whose identity comes from the configuration"),
 				PlanOnly: true,
+			},
+			{
+				// Update with the uuid still pinned: the job must stay under it.
+				Config: testAccJobConfig_settableUUID(pinned, "Description changed while the uuid stays pinned"),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("rundeck_job.test", "description", "Description changed while the uuid stays pinned"),
+					resource.TestCheckResourceAttr("rundeck_job.test", "uuid", pinned),
+					requireJobID(&pinned),
+				),
+			},
+			{
+				// Changing the uuid replaces the job under the new one.
+				Config: testAccJobConfig_settableUUID(replacement, "Description changed while the uuid stays pinned"),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("rundeck_job.test", "uuid", replacement),
+					requireJobID(&replacement),
+				),
 			},
 		},
 	})
 }
 
-const testAccJobConfig_settableUUID = `
+// randomJobUUID keeps each run on its own UUID: Rundeck enforces uniqueness
+// instance-wide, so a literal would strand the next run behind any job a killed
+// run left behind.
+func randomJobUUID(t *testing.T) string {
+	t.Helper()
+
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		t.Fatalf("generating a uuid: %v", err)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+func testAccJobConfig_settableUUID(uuid, description string) string {
+	return fmt.Sprintf(`
 resource "rundeck_project" "test" {
   name        = "terraform-acc-test-job-uuid"
   description = "Test project for settable job uuid"
@@ -124,12 +172,13 @@ resource "rundeck_project" "test" {
 
 resource "rundeck_job" "test" {
   project_name      = rundeck_project.test.name
-  uuid              = "8c1d4e2a-7b93-4f61-95c8-2e0a6d3f7b14"
+  uuid              = %q
   name              = "job-with-pinned-uuid"
-  description       = "Job whose identity comes from the configuration"
+  description       = %q
   execution_enabled = true
   command {
     shell_command = "echo hello"
   }
 }
-`
+`, uuid, description)
+}
