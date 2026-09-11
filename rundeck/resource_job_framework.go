@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -22,8 +24,13 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
+
+// Rundeck itself only constrains a job uuid to VALID_RESOURCE_NAME_REGEX, but its
+// UI, job references and documentation links all assume a UUID.
+var canonicalUUIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 type jobResource struct {
 	client *RundeckClients
@@ -32,6 +39,7 @@ type jobResource struct {
 // jobResourceModel represents the Terraform resource model
 type jobResourceModel struct {
 	ID                          types.String `tfsdk:"id"`
+	UUID                        types.String `tfsdk:"uuid"`
 	Name                        types.String `tfsdk:"name"`
 	GroupName                   types.String `tfsdk:"group_name"`
 	ProjectName                 types.String `tfsdk:"project_name"`
@@ -164,6 +172,25 @@ func (r *jobResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 				Computed: true,
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.UseStateForUnknown(),
+				},
+			},
+			// Set, the job's identity comes from the configuration, so the same
+			// Terraform rebuilds an instance with the same job UUIDs. Unset, it is
+			// computed from the server as before.
+			"uuid": schema.StringAttribute{
+				Optional:    true,
+				Computed:    true,
+				Description: "Job UUID. Set it to pin the job's identity across rebuilds of a Rundeck instance; leave it unset to let Rundeck generate one. Changing a configured value replaces the job.",
+				PlanModifiers: []planmodifier.String{
+					// The attribute being computed, only a configured change may replace.
+					stringplanmodifier.RequiresReplaceIfConfigured(),
+					stringplanmodifier.UseStateForUnknown(),
+				},
+				Validators: []validator.String{
+					stringvalidator.RegexMatches(
+						canonicalUUIDPattern,
+						"must be a canonical lowercase UUID (8-4-4-4-12 hexadecimal digits), e.g. \"11111111-2222-3333-4444-555555555555\"",
+					),
 				},
 			},
 			"name": schema.StringAttribute{
@@ -571,6 +598,40 @@ func (r *jobResource) ValidateConfig(ctx context.Context, req resource.ValidateC
 			}
 		}
 	}
+}
+
+// ModifyPlan warns when a configured uuid change is about to replace the job.
+// The replacement itself is visible in the plan; what it costs is not, since a
+// job's UUID is referenced from outside this state file.
+func (r *jobResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	// Nothing to compare while creating or destroying.
+	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+		return
+	}
+
+	var stateUUID, configUUID types.String
+	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("uuid"), &stateUUID)...)
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("uuid"), &configUUID)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Unconfigured, the uuid keeps whatever the server assigned: not a change.
+	if configUUID.IsNull() || configUUID.IsUnknown() || stateUUID.IsNull() {
+		return
+	}
+	if configUUID.Equal(stateUUID) {
+		return
+	}
+
+	resp.Diagnostics.AddAttributeWarning(
+		path.Root("uuid"),
+		"Job UUID change replaces the job",
+		fmt.Sprintf("Changing uuid from %q to %q destroys this job and creates a new one under the new UUID.\n\n"+
+			"A job's UUID is how it is referenced outside Terraform: jobref blocks pointing at it by UUID (including in jobs this configuration does not manage), documentation and runbook links, and bookmarks all name the old UUID and will not follow the change. The job's execution history stays with the job being destroyed.\n\n"+
+			"If the intent is to pin this job's current identity rather than change it, set uuid to %q — that plans as no change.",
+			stateUUID.ValueString(), configUUID.ValueString(), stateUUID.ValueString()),
+	)
 }
 
 func (r *jobResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -1034,6 +1095,12 @@ func (r *jobResource) planToJobJSON(ctx context.Context, plan *jobResourceModel)
 		ScheduleEnabled:        plan.ScheduleEnabled.ValueBool(),
 	}
 
+	// "uuid" is the field the import reads back and that uuidOption=preserve acts
+	// on; omitted, the server mints one.
+	if !plan.UUID.IsNull() && !plan.UUID.IsUnknown() {
+		job.UUID = plan.UUID.ValueString()
+	}
+
 	if !plan.AllowConcurrentExecutions.IsNull() {
 		job.MultipleExecutions = plan.AllowConcurrentExecutions.ValueBool()
 	}
@@ -1238,6 +1305,7 @@ func (r *jobResource) planToJobJSON(ctx context.Context, plan *jobResourceModel)
 // jobJSONToState converts Rundeck job JSON to Terraform state
 func (r *jobResource) jobJSONToState(ctx context.Context, job *jobJSON, state *jobResourceModel) error {
 	state.ID = types.StringValue(job.ID)
+	state.UUID = types.StringValue(job.ID)
 	state.Name = types.StringValue(job.Name)
 	state.GroupName = types.StringValue(job.Group)
 	// Project name is not returned by JobGet API, preserve from current state
@@ -1394,6 +1462,7 @@ func (r *jobResource) jobJSONToState(ctx context.Context, job *jobJSON, state *j
 func (r *jobResource) jobJSONAPIToState(ctx context.Context, job *JobJSON, state *jobResourceModel) error {
 	// Map JSON fields directly to Terraform state
 	state.ID = types.StringValue(job.ID)
+	state.UUID = types.StringValue(job.ID)
 	state.Name = types.StringValue(job.Name)
 
 	// Only set group_name if API returns a non-empty value

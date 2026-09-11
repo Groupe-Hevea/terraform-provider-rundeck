@@ -1,5 +1,17 @@
 ## Unreleased
 
+**Enhancements**
+
+### Job Resource
+
+- **Added a settable `uuid` to `rundeck_job`** - A job's UUID is its identity in Rundeck, and the provider had no way to supply one: the create payload carried no `uuid`, so the server minted a fresh one every time. Rebuilding an instance from the same Terraform therefore produced different UUIDs than the instance it replaced, breaking everything that refers to a job by UUID from outside Terraform — `jobref` blocks, documentation and runbook links, bookmarks. The create path already sent `uuidOption=preserve`, so there was simply nothing in the payload for it to preserve.
+
+  `uuid` is `Optional` + `Computed`: left unset it is read back from the server exactly as before, so existing configurations are unaffected and no state migration is needed. Set, it must be a canonical lowercase UUID and travels in the payload's `uuid` field — the one Rundeck reads back on import (`ScheduledExecution.fromMap`) and the one `uuidOption=preserve` acts on.
+
+  Setting `uuid` to the value a job already has plans as no change, so an existing estate can be pinned in place without recreating anything. Changing a `uuid` that is already set replaces the job, since Rundeck cannot renumber one in place; the plan shows the replacement and the provider warns, because the references that break live outside Terraform's state. Removing `uuid` from a configuration is not a change — the job keeps the UUID it has.
+
+  Two consequences worth noting. Rundeck constrains job UUIDs to be unique across the whole instance rather than per project (`ScheduledExecution.uuid(unique: true)`), so a colliding apply fails instead of creating a duplicate. And because `Create` sends `dupeOption=create`, re-applying against a job that already carries a pinned UUID now errors rather than silently creating a second job with a new UUID, as it did when the state was lost.
+
 ## 1.4.0
 
 **Bug Fixes**
