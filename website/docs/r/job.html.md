@@ -553,7 +553,9 @@ A command's `job` block has the following structure:
 
 * `group_name`: (Optional) The name of the group that the target job belongs to, if any. Used with name-based references.
 
-* `project_name` - (Optional) The name of another project that holds the target job. Used with name-based references. Rundeck always resolves and returns all four identification fields for a job reference, so `uuid`/`name`/`group_name`/`project_name` are populated from the API on refresh even when only a subset was configured (e.g. a UUID-only reference).
+* `project_name` - (Optional) The name of another project that holds the target job. Used with name-based references.
+
+A reference by name is stored as configured: an identification field left out stays unset, so a reference without `project_name` targets the project of the job that holds it. A reference by `uuid` is resolved by Rundeck, and the `name`/`group_name`/`project_name` it returns are populated from the API on refresh.
 
 **Job Execution Options:**
 

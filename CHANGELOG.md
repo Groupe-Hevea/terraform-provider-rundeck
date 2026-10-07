@@ -1,5 +1,17 @@
 ## Unreleased
 
+**Bug Fixes**
+
+### Job Resource
+
+- **Fixed job references taking each other's settings when commands are reordered** - A job reference's `uuid`, `name`, `group_name`, `project_name`, `run_for_each_node` and `node_step` are `Optional` + `Computed` and carried `UseStateForUnknown`. `command` and `error_handler` are list blocks, and `UseStateForUnknown` reads prior state at the same list index: once commands were inserted, removed or moved, any of these attributes left out of the configuration was filled from whichever command used to sit at that position. This is the carry-over 1.5.0 kept `expand_token_in_script_file` clear of; job references still had it.
+
+  Two things followed. A reference naming no project, landing where a reference to another project had been, inherited that `project_name`: the apply succeeded, and the job then failed at run time with `Job [...] not found by name, project: ...`. The same went for `node_step`, and a `run_for_each_node` inherited that way overrode a configured `node_step`, since it takes precedence. And a reference landing where there had been no job reference at all had the two flags planned as `null`, which read back as `false` and failed the apply with `Provider produced inconsistent result after apply`.
+
+  These attributes are now planned from the reference itself. `run_for_each_node` and `node_step` take the value of whichever alias is configured; with neither configured they are `false` on a command, and `(known after apply)` on an error handler, whose reference follows the step it handles. For a reference by name, an identification field left out plans as unset, which is how Rundeck stores it. For a reference by `uuid`, the fields Rundeck resolves are reused from prior state only when it describes the same `uuid`, and are otherwise `(known after apply)`.
+
+  State that already holds a carried-over value, or a `project_name` set on a name-based reference outside Terraform, shows a one-time correction on the next plan.
+
 ## 1.5.0
 
 **Bug Fixes**
