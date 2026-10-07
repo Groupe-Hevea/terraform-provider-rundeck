@@ -121,7 +121,7 @@ func jobCommandNestedBlock() schema.ListNestedBlock {
 							"project_name": schema.StringAttribute{
 								Optional:    true,
 								Computed:    true,
-								Description: "Project containing the job. Used with name-based references. Also populated from the API for uuid-based references, since Rundeck always resolves a job reference to a specific project.",
+								Description: "Project containing the job. Used with name-based references; left out, the job is looked up in the project of the job holding the reference.",
 								PlanModifiers: []planmodifier.String{
 									jobRefIdentityFromConfig(),
 								},
@@ -323,7 +323,7 @@ func jobCommandNestedBlock() schema.ListNestedBlock {
 										"project_name": schema.StringAttribute{
 											Optional:    true,
 											Computed:    true,
-											Description: "Project containing the job. Used with name-based references. Also populated from the API for uuid-based references, since Rundeck always resolves a job reference to a specific project.",
+											Description: "Project containing the job. Used with name-based references; left out, the job is looked up in the project of the job holding the reference.",
 											PlanModifiers: []planmodifier.String{
 												jobRefIdentityFromConfig(),
 											},

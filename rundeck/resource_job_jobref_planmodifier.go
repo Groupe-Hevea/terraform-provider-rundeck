@@ -2,6 +2,7 @@ package rundeck
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -16,30 +17,27 @@ import (
 
 // jobRefNodeStepFromConfig plans run_for_each_node and node_step, two aliases
 // of the API's nodeStep flag: the one left out of the configuration takes the
-// value of the one that is set.
-//
-// With neither set, a command's reference is a workflow step and both plan as
-// false. An error handler's reference has no such constant — it follows the
-// step it handles — so it is left for apply to settle.
+// value of the one that is set, and with neither set both take the value the
+// provider sends in that case. What is sent and what is read back are thus both
+// known at plan time.
 func jobRefNodeStepFromConfig() planmodifier.Bool {
-	return jobRefNodeStepModifier{defaultsToFalse: true}
+	return jobRefNodeStepModifier{unset: false}
 }
 
 // errorHandlerJobRefNodeStepFromConfig is jobRefNodeStepFromConfig for a
-// reference held by an error handler.
+// reference held by an error handler, which has its own default.
 func errorHandlerJobRefNodeStepFromConfig() planmodifier.Bool {
-	return jobRefNodeStepModifier{}
+	return jobRefNodeStepModifier{unset: errorHandlerJobRefNodeStepDefault}
 }
 
+// jobRefNodeStepModifier holds the value both aliases take when neither is
+// configured.
 type jobRefNodeStepModifier struct {
-	defaultsToFalse bool
+	unset bool
 }
 
 func (m jobRefNodeStepModifier) Description(_ context.Context) string {
-	if m.defaultsToFalse {
-		return "When not configured, takes the value of its alias, or false."
-	}
-	return "When not configured, takes the value of its alias."
+	return fmt.Sprintf("When not configured, takes the value of its alias, or %t.", m.unset)
 }
 
 func (m jobRefNodeStepModifier) MarkdownDescription(ctx context.Context) string {
@@ -68,9 +66,10 @@ func (m jobRefNodeStepModifier) PlanModifyBool(ctx context.Context, req planmodi
 		"run_for_each_node": runForEachNode,
 		"node_step":         nodeStep,
 	})
-	if explicit || m.defaultsToFalse {
-		resp.PlanValue = types.BoolValue(value)
+	if !explicit {
+		value = m.unset
 	}
+	resp.PlanValue = types.BoolValue(value)
 }
 
 // jobRefIdentityFromConfig plans the attributes that designate the referenced

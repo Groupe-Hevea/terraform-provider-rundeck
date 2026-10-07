@@ -2,6 +2,7 @@ package rundeck
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
@@ -16,8 +17,8 @@ import (
 // attribute left out of the configuration was filled from whichever command
 // used to sit at that position.
 //
-//   - The first reorder swaps a reference to a job of another project with a reference
-//     that names no project. The latter used to inherit the former's
+//   - The first reorder swaps a reference to a job of another project with a
+//     reference that names no project. The latter used to inherit the former's
 //     project_name and node_step, and Rundeck then looked for the job in the
 //     wrong project at run time.
 //   - The second reorder moves references to positions that held a plain
@@ -28,6 +29,10 @@ import (
 // The reference by uuid covers the other half: Rundeck resolves it, and what
 // it returns must neither show up as a diff on the next plan nor follow the
 // reference that takes its place.
+//
+// Two commands carry an error handler that is itself a job reference, one with
+// its node-step flag left out and one with it set to false, so that the
+// handlers move along and land on each other's positions too.
 func TestAccJob_cmd_referred_job_reorder(t *testing.T) {
 	const (
 		local  = "local-target"
@@ -35,16 +40,28 @@ func TestAccJob_cmd_referred_job_reorder(t *testing.T) {
 	)
 
 	// Each element is one command of the caller job, in workflow order.
-	exec := `
+	exec := fmt.Sprintf(`
   command {
     shell_command = "echo between"
-  }`
+    error_handler {
+      job {
+        name = %q
+      }
+    }
+  }`, local)
 	localRef := fmt.Sprintf(`
   command {
     job {
       name = %q
     }
-  }`, local)
+    error_handler {
+      job {
+        name         = %q
+        project_name = rundeck_project.remote.name
+        node_step    = false
+      }
+    }
+  }`, local, remote)
 	remoteRef := fmt.Sprintf(`
   command {
     job {
@@ -61,9 +78,11 @@ func TestAccJob_cmd_referred_job_reorder(t *testing.T) {
   }`
 
 	// checkRefs asserts what each job reference holds, given the index in the
-	// workflow of the reference by name, of the one to another project, and of
-	// the one by uuid.
-	checkRefs := func(localIdx, remoteIdx, uuidIdx int) resource.TestCheckFunc {
+	// workflow of the plain command, of the reference by name, of the one to
+	// another project, and of the one by uuid.
+	checkRefs := func(execIdx, localIdx, remoteIdx, uuidIdx int) resource.TestCheckFunc {
+		eh := fmt.Sprintf("command.%d.error_handler.0.job.0.", execIdx)
+		lh := fmt.Sprintf("command.%d.error_handler.0.job.0.", localIdx)
 		l := fmt.Sprintf("command.%d.job.0.", localIdx)
 		r := fmt.Sprintf("command.%d.job.0.", remoteIdx)
 		u := fmt.Sprintf("command.%d.job.0.", uuidIdx)
@@ -79,24 +98,44 @@ func TestAccJob_cmd_referred_job_reorder(t *testing.T) {
 			resource.TestCheckResourceAttr("rundeck_job.caller", r+"run_for_each_node", "true"),
 			resource.TestCheckResourceAttrPair("rundeck_job.caller", u+"uuid", "rundeck_job.local", "id"),
 			resource.TestCheckResourceAttr("rundeck_job.caller", u+"node_step", "false"),
+			// A handler's reference is a node step unless it says otherwise.
+			resource.TestCheckResourceAttr("rundeck_job.caller", eh+"name", local),
+			resource.TestCheckNoResourceAttr("rundeck_job.caller", eh+"project_name"),
+			resource.TestCheckResourceAttr("rundeck_job.caller", eh+"node_step", "true"),
+			resource.TestCheckResourceAttr("rundeck_job.caller", eh+"run_for_each_node", "true"),
+			resource.TestCheckResourceAttr("rundeck_job.caller", lh+"name", remote),
+			resource.TestCheckResourceAttr("rundeck_job.caller", lh+"project_name", "terraform-acc-test-jobref-reorder-remote"),
+			resource.TestCheckResourceAttr("rundeck_job.caller", lh+"node_step", "false"),
+			resource.TestCheckResourceAttr("rundeck_job.caller", lh+"run_for_each_node", "false"),
 		)
 	}
 
 	initial := testAccJobConfig_cmd_referred_job_reorder(exec, localRef, remoteRef, uuidRef)
 	swapped := testAccJobConfig_cmd_referred_job_reorder(exec, remoteRef, localRef, uuidRef)
 	moved := testAccJobConfig_cmd_referred_job_reorder(uuidRef, localRef, exec, remoteRef)
+	// Same workflow, the handler's node_step = false taken out: it goes back
+	// to a handler's default instead of keeping the value it had.
+	unset := testAccJobConfig_cmd_referred_job_reorder(uuidRef, strings.Replace(localRef, "node_step    = false", "", 1), exec, remoteRef)
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories(),
 		CheckDestroy:             testAccJobCheckDestroy(),
 		Steps: []resource.TestStep{
-			{Config: initial, Check: checkRefs(1, 2, 3)},
+			{Config: initial, Check: checkRefs(0, 1, 2, 3)},
 			{Config: initial, PlanOnly: true},
-			{Config: swapped, Check: checkRefs(2, 1, 3)},
+			{Config: swapped, Check: checkRefs(0, 2, 1, 3)},
 			{Config: swapped, PlanOnly: true},
-			{Config: moved, Check: checkRefs(1, 3, 0)},
+			{Config: moved, Check: checkRefs(2, 1, 3, 0)},
 			{Config: moved, PlanOnly: true},
+			{
+				Config: unset,
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("rundeck_job.caller", "command.1.error_handler.0.job.0.node_step", "true"),
+					resource.TestCheckResourceAttr("rundeck_job.caller", "command.1.error_handler.0.job.0.run_for_each_node", "true"),
+				),
+			},
+			{Config: unset, PlanOnly: true},
 		},
 	})
 }
