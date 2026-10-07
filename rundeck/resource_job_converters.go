@@ -33,6 +33,16 @@ func jobRefNodeStep(jobAttrs map[string]attr.Value) bool {
 	return v
 }
 
+// errorHandlerJobRefNodeStepDefault is the nodeStep flag sent for an error
+// handler's job reference when neither run_for_each_node nor node_step is set.
+//
+// A command's reference defaults to false. A handler's cannot: Rundeck refuses
+// a handler that is not a node step when the step it handles is one, and that
+// is the common case — a shell command, a script or a node step plugin. A
+// handler under a workflow step that should not run once per node says so with
+// node_step = false.
+const errorHandlerJobRefNodeStepDefault = true
+
 // convertCommandsToJSON converts Framework command list to JSON array
 func convertCommandsToJSON(ctx context.Context, commandsList types.List) ([]interface{}, diag.Diagnostics) {
 	var diags diag.Diagnostics
@@ -114,17 +124,17 @@ func convertCommandsToJSON(ctx context.Context, commandsList types.List) ([]inte
 				jobMap := make(map[string]interface{})
 
 				// UUID reference (preferred, immutable)
-				if uuid, ok := jobAttrs["uuid"].(types.String); ok && !uuid.IsNull() {
+				if uuid, ok := jobAttrs["uuid"].(types.String); ok && !uuid.IsNull() && !uuid.IsUnknown() {
 					jobMap["uuid"] = uuid.ValueString()
 				}
 				// Name-based reference (backward compatible)
-				if name, ok := jobAttrs["name"].(types.String); ok && !name.IsNull() {
+				if name, ok := jobAttrs["name"].(types.String); ok && !name.IsNull() && !name.IsUnknown() {
 					jobMap["name"] = name.ValueString()
 				}
-				if group, ok := jobAttrs["group_name"].(types.String); ok && !group.IsNull() {
+				if group, ok := jobAttrs["group_name"].(types.String); ok && !group.IsNull() && !group.IsUnknown() {
 					jobMap["group"] = group.ValueString()
 				}
-				if project, ok := jobAttrs["project_name"].(types.String); ok && !project.IsNull() {
+				if project, ok := jobAttrs["project_name"].(types.String); ok && !project.IsNull() && !project.IsUnknown() {
 					jobMap["project"] = project.ValueString()
 				}
 				// run_for_each_node (documented) and node_step are aliases for the
@@ -304,36 +314,22 @@ func convertCommandsToJSON(ctx context.Context, commandsList types.List) ([]inte
 						jobMap := make(map[string]interface{})
 
 						// UUID reference (preferred, immutable)
-						if uuid, ok := jobAttrs["uuid"].(types.String); ok && !uuid.IsNull() {
+						if uuid, ok := jobAttrs["uuid"].(types.String); ok && !uuid.IsNull() && !uuid.IsUnknown() {
 							jobMap["uuid"] = uuid.ValueString()
 						}
 						// Name-based reference (backward compatible)
-						if name, ok := jobAttrs["name"].(types.String); ok && !name.IsNull() {
+						if name, ok := jobAttrs["name"].(types.String); ok && !name.IsNull() && !name.IsUnknown() {
 							jobMap["name"] = name.ValueString()
 						}
-						if group, ok := jobAttrs["group_name"].(types.String); ok && !group.IsNull() {
+						if group, ok := jobAttrs["group_name"].(types.String); ok && !group.IsNull() && !group.IsUnknown() {
 							jobMap["group"] = group.ValueString()
 						}
-						if project, ok := jobAttrs["project_name"].(types.String); ok && !project.IsNull() {
+						if project, ok := jobAttrs["project_name"].(types.String); ok && !project.IsNull() && !project.IsUnknown() {
 							jobMap["project"] = project.ValueString()
 						}
-						// Determine if parent command is a node step or workflow step.
-						// Error handlers must match the parent command type, so this is
-						// the fallback when neither alias is set explicitly.
-						isParentNodeStep := false
-						if _, hasNodeStepPlugin := attrs["node_step_plugin"]; hasNodeStepPlugin {
-							isParentNodeStep = true
-						} else if _, hasStepPlugin := attrs["step_plugin"]; hasStepPlugin {
-							isParentNodeStep = false // step_plugin is workflow step
-						} else {
-							// shell_command, inline_script, etc. are workflow steps (not node steps)
-							isParentNodeStep = false
-						}
-
 						// run_for_each_node (documented) and node_step are aliases for the
-						// API's nodeStep flag. Prefer an explicit value, otherwise infer
-						// from the parent command type (#256).
-						nodeStepVal := isParentNodeStep
+						// API's nodeStep flag (#256).
+						nodeStepVal := errorHandlerJobRefNodeStepDefault
 						if v, explicit := jobRefNodeStepExplicit(jobAttrs); explicit {
 							nodeStepVal = v
 						}
@@ -1802,15 +1798,14 @@ func convertCommandsFromJSON(ctx context.Context, commands []interface{}) (types
 		}
 
 		cmdAttrs := map[string]attr.Value{
-			"description":                 types.StringNull(),
-			"shell_command":               types.StringNull(),
-			"inline_script":               types.StringNull(),
-			"script_url":                  types.StringNull(),
-			"script_file":                 types.StringNull(),
-			"script_file_args":            types.StringNull(),
-			"file_extension":              types.StringNull(),
-			"expand_token_in_script_file": types.BoolNull(),
-			"keep_going_on_success":       types.BoolNull(),
+			"description":           types.StringNull(),
+			"shell_command":         types.StringNull(),
+			"inline_script":         types.StringNull(),
+			"script_url":            types.StringNull(),
+			"script_file":           types.StringNull(),
+			"script_file_args":      types.StringNull(),
+			"file_extension":        types.StringNull(),
+			"keep_going_on_success": types.BoolNull(),
 			// Note: script_interpreter, plugins, job, etc. are only set if they exist in the API response
 			// to avoid needing complex type definitions for all possible nested structures
 		}
@@ -1839,9 +1834,16 @@ func convertCommandsFromJSON(ctx context.Context, commands []interface{}) (types
 		}
 
 		// Boolean fields
+		// Rundeck omits expandTokenInScriptFile from the API response entirely
+		// for a shell_command, but explicitly returns it (false) for a
+		// script-based command since Rundeck 6.2.1 - default to a concrete
+		// false rather than leaving this null (expand_token_in_script_file is
+		// Computed to allow this).
+		expandTokenInScriptFile := false
 		if v, ok := cmd["expandTokenInScriptFile"].(bool); ok {
-			cmdAttrs["expand_token_in_script_file"] = types.BoolValue(v)
+			expandTokenInScriptFile = v
 		}
+		cmdAttrs["expand_token_in_script_file"] = types.BoolValue(expandTokenInScriptFile)
 		if v, ok := cmd["keepgoingOnSuccess"].(bool); ok {
 			cmdAttrs["keep_going_on_success"] = types.BoolValue(v)
 		}
@@ -1895,15 +1897,13 @@ func convertCommandsFromJSON(ctx context.Context, commands []interface{}) (types
 		// Handle error_handler
 		if handler, ok := cmd["errorhandler"].(map[string]interface{}); ok {
 			handlerAttrs := map[string]attr.Value{
-				"description":                 types.StringNull(),
-				"shell_command":               types.StringNull(),
-				"inline_script":               types.StringNull(),
-				"script_url":                  types.StringNull(),
-				"script_file":                 types.StringNull(),
-				"script_file_args":            types.StringNull(),
-				"file_extension":              types.StringNull(),
-				"expand_token_in_script_file": types.BoolNull(),
-				"keep_going_on_success":       types.BoolNull(),
+				"description":      types.StringNull(),
+				"shell_command":    types.StringNull(),
+				"inline_script":    types.StringNull(),
+				"script_url":       types.StringNull(),
+				"script_file":      types.StringNull(),
+				"script_file_args": types.StringNull(),
+				"file_extension":   types.StringNull(),
 			}
 
 			// String fields
@@ -1930,9 +1930,16 @@ func convertCommandsFromJSON(ctx context.Context, commands []interface{}) (types
 			}
 
 			// Boolean fields
+			// Rundeck omits expandTokenInScriptFile from the API response
+			// entirely for a shell_command, but explicitly returns it (false)
+			// for a script-based error handler since Rundeck 6.2.1 - default
+			// to a concrete false rather than leaving this null
+			// (expand_token_in_script_file is Computed to allow this).
+			expandTokenInScriptFile := false
 			if v, ok := handler["expandTokenInScriptFile"].(bool); ok {
-				handlerAttrs["expand_token_in_script_file"] = types.BoolValue(v)
+				expandTokenInScriptFile = v
 			}
+			handlerAttrs["expand_token_in_script_file"] = types.BoolValue(expandTokenInScriptFile)
 			// Rundeck omits keepgoingOnSuccess from the API response entirely when
 			// it is false, so default to a concrete false rather than leaving this
 			// null (keep_going_on_success is Computed to allow this).

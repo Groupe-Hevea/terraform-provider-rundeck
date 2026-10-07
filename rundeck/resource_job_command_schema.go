@@ -3,7 +3,6 @@ package rundeck
 import (
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -40,6 +39,13 @@ func jobCommandNestedBlock() schema.ListNestedBlock {
 				},
 				"expand_token_in_script_file": schema.BoolAttribute{
 					Optional: true,
+					Computed: true,
+					Description: "Expand embedded tokens in the script file before executing it. Rundeck's API " +
+						"omits this field entirely when false for a shell_command, but explicitly returns " +
+						"false when used with script_file/script_url since Rundeck 6.2.1 - Computed to " +
+						"tolerate either. No PlanModifiers: this is a ListNestedBlock, and UseStateForUnknown " +
+						"matches prior state by list index, which would carry a value across to an unrelated " +
+						"command when the list is reordered/inserted into.",
 				},
 				"file_extension": schema.StringAttribute{
 					Optional:    true,
@@ -93,7 +99,7 @@ func jobCommandNestedBlock() schema.ListNestedBlock {
 								Computed:    true,
 								Description: "UUID of the job to reference (immutable, preferred). Can reference another rundeck_job's id attribute.",
 								PlanModifiers: []planmodifier.String{
-									stringplanmodifier.UseStateForUnknown(),
+									jobRefIdentityFromConfig(),
 								},
 							},
 							"name": schema.StringAttribute{
@@ -101,7 +107,7 @@ func jobCommandNestedBlock() schema.ListNestedBlock {
 								Computed:    true,
 								Description: "Name of the job to reference. Required if uuid is not specified.",
 								PlanModifiers: []planmodifier.String{
-									stringplanmodifier.UseStateForUnknown(),
+									jobRefIdentityFromConfig(),
 								},
 							},
 							"group_name": schema.StringAttribute{
@@ -109,15 +115,15 @@ func jobCommandNestedBlock() schema.ListNestedBlock {
 								Computed:    true,
 								Description: "Group path of the job. Used with name-based references.",
 								PlanModifiers: []planmodifier.String{
-									stringplanmodifier.UseStateForUnknown(),
+									jobRefIdentityFromConfig(),
 								},
 							},
 							"project_name": schema.StringAttribute{
 								Optional:    true,
 								Computed:    true,
-								Description: "Project containing the job. Used with name-based references. Also populated from the API for uuid-based references, since Rundeck always resolves a job reference to a specific project.",
+								Description: "Project containing the job. Used with name-based references; left out, the job is looked up in the project of the job holding the reference.",
 								PlanModifiers: []planmodifier.String{
-									stringplanmodifier.UseStateForUnknown(),
+									jobRefIdentityFromConfig(),
 								},
 							},
 							"run_for_each_node": schema.BoolAttribute{
@@ -125,7 +131,7 @@ func jobCommandNestedBlock() schema.ListNestedBlock {
 								Computed:    true,
 								Description: "Whether the referenced job runs once per node (node step). Alias of node_step; both map to the API's nodeStep flag, and run_for_each_node takes precedence if both are set.",
 								PlanModifiers: []planmodifier.Bool{
-									boolplanmodifier.UseStateForUnknown(),
+									jobRefNodeStepFromConfig(),
 								},
 							},
 							"node_step": schema.BoolAttribute{
@@ -133,7 +139,7 @@ func jobCommandNestedBlock() schema.ListNestedBlock {
 								Computed:    true,
 								Description: "Run the referenced job as a node step (once per node). Alias of run_for_each_node.",
 								PlanModifiers: []planmodifier.Bool{
-									boolplanmodifier.UseStateForUnknown(),
+									jobRefNodeStepFromConfig(),
 								},
 							},
 							"args": schema.StringAttribute{
@@ -252,6 +258,14 @@ func jobCommandNestedBlock() schema.ListNestedBlock {
 							},
 							"expand_token_in_script_file": schema.BoolAttribute{
 								Optional: true,
+								Computed: true,
+								Description: "Expand embedded tokens in the script file before executing it. Rundeck's " +
+									"API omits this field entirely when false for a shell_command, but explicitly " +
+									"returns false when used with script_file/script_url since Rundeck 6.2.1 - " +
+									"Computed to tolerate either. No PlanModifiers: this is a ListNestedBlock, and " +
+									"UseStateForUnknown matches prior state by list index, which would carry a " +
+									"value across to an unrelated error handler when the list is reordered/inserted " +
+									"into.",
 							},
 							"file_extension": schema.StringAttribute{
 								Optional: true,
@@ -261,10 +275,8 @@ func jobCommandNestedBlock() schema.ListNestedBlock {
 								Computed: true,
 								Description: "Continue workflow even if error handler succeeds. Rundeck's API omits this " +
 									"field entirely when false, so it is Computed to avoid drift/inconsistent-apply " +
-									"errors on that default.",
-								PlanModifiers: []planmodifier.Bool{
-									boolplanmodifier.UseStateForUnknown(),
-								},
+									"errors on that default. No PlanModifiers, for the same list-index-carryover " +
+									"reason as expand_token_in_script_file above.",
 							},
 						},
 						Blocks: map[string]schema.Block{
@@ -289,7 +301,7 @@ func jobCommandNestedBlock() schema.ListNestedBlock {
 											Computed:    true,
 											Description: "UUID of the job to reference (immutable, preferred). Can reference another rundeck_job's id attribute.",
 											PlanModifiers: []planmodifier.String{
-												stringplanmodifier.UseStateForUnknown(),
+												jobRefIdentityFromConfig(),
 											},
 										},
 										"name": schema.StringAttribute{
@@ -297,7 +309,7 @@ func jobCommandNestedBlock() schema.ListNestedBlock {
 											Computed:    true,
 											Description: "Name of the job to reference. Required if uuid is not specified.",
 											PlanModifiers: []planmodifier.String{
-												stringplanmodifier.UseStateForUnknown(),
+												jobRefIdentityFromConfig(),
 											},
 										},
 										"group_name": schema.StringAttribute{
@@ -305,15 +317,15 @@ func jobCommandNestedBlock() schema.ListNestedBlock {
 											Computed:    true,
 											Description: "Group path of the job. Used with name-based references.",
 											PlanModifiers: []planmodifier.String{
-												stringplanmodifier.UseStateForUnknown(),
+												jobRefIdentityFromConfig(),
 											},
 										},
 										"project_name": schema.StringAttribute{
 											Optional:    true,
 											Computed:    true,
-											Description: "Project containing the job. Used with name-based references. Also populated from the API for uuid-based references, since Rundeck always resolves a job reference to a specific project.",
+											Description: "Project containing the job. Used with name-based references; left out, the job is looked up in the project of the job holding the reference.",
 											PlanModifiers: []planmodifier.String{
-												stringplanmodifier.UseStateForUnknown(),
+												jobRefIdentityFromConfig(),
 											},
 										},
 										"run_for_each_node": schema.BoolAttribute{
@@ -321,7 +333,7 @@ func jobCommandNestedBlock() schema.ListNestedBlock {
 											Computed:    true,
 											Description: "Whether the referenced job runs once per node (node step). Alias of node_step; both map to the API's nodeStep flag, and run_for_each_node takes precedence if both are set.",
 											PlanModifiers: []planmodifier.Bool{
-												boolplanmodifier.UseStateForUnknown(),
+												errorHandlerJobRefNodeStepFromConfig(),
 											},
 										},
 										"node_step": schema.BoolAttribute{
@@ -329,7 +341,7 @@ func jobCommandNestedBlock() schema.ListNestedBlock {
 											Computed:    true,
 											Description: "Run the referenced job as a node step (once per node). Alias of run_for_each_node.",
 											PlanModifiers: []planmodifier.Bool{
-												boolplanmodifier.UseStateForUnknown(),
+												errorHandlerJobRefNodeStepFromConfig(),
 											},
 										},
 										"args": schema.StringAttribute{
@@ -449,8 +461,7 @@ func jobOptionNestedBlock() schema.ListNestedBlock {
 				// Optional-only would make an unset delimiter read back as ","
 				// and fail the apply with an inconsistent result. UseStateForUnknown
 				// keeps an unconfigured delimiter from planning as "(known after
-				// apply)" on every subsequent plan, matching run_for_each_node/
-				// node_step, the other Optional+Computed attributes on this path.
+				// apply)" on every subsequent plan.
 				"values_list_delimiter": schema.StringAttribute{
 					Optional:    true,
 					Computed:    true,

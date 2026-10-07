@@ -6,18 +6,23 @@ attendant qu'ils soient intégrés en amont.
 
 | Apport | PR amont |
 |---|---|
-| `uuid` configurable sur `rundeck_job` | à proposer |
-| `group_name` déplace le job au lieu de le remplacer | [#301](https://github.com/rundeck/terraform-provider-rundeck/pull/301) |
+| Une référence de job ne reprend plus les réglages de la commande qui occupait sa position | [#306](https://github.com/rundeck/terraform-provider-rundeck/pull/306) |
 
-Les apports précédents (#284 à #288) sont intégrés en amont depuis la **v1.4.0 du
-27 août 2026**. Cette build repart donc de la `main` amont et ne conserve aucun
-correctif local hormis ceux ci-dessus.
+Les apports précédents — `uuid` configurable sur `rundeck_job` (#302) et
+`group_name` qui déplace le job au lieu de le remplacer (#301) — sont intégrés en
+amont depuis la **v1.5.0 du 23 septembre 2026**. Cette build repart donc de la
+`main` amont et ne conserve aucun correctif local hormis celui ci-dessus.
 
 > **`1.5.0-allopneus.1` et `.2` sont à proscrire.** Une revue adverse y a trouvé,
 > sur chacun des deux apports, un chemin de perte de données : l'épinglage d'un
 > UUID sur un état antérieur à l'attribut planifiait le remplacement de tous les
 > jobs, et un update de groupe pouvait suivre silencieusement un doublon. Les deux
 > sont corrigés en `.3`.
+
+> **`1.5.0-allopneus.3` et antérieures : ne pas réordonner les étapes d'un job
+> qui porte des références de job.** Un champ non renseigné d'une référence y est
+> repris de l'étape qui occupait la même position, projet compris. Corrigé en
+> `.4`.
 
 Les versions portent un suffixe `-allopneus.N`, qui les distingue sans risque de
 collision avec une version amont. Ce sont des préversions au sens semver : elles
@@ -29,19 +34,43 @@ terraform {
   required_providers {
     rundeck = {
       source  = "Groupe-Hevea/rundeck"
-      version = "1.5.0-allopneus.3"
+      version = "1.5.0-allopneus.4"
     }
   }
 }
 ```
 
-Quand l'amont aura publié ces changements, repasser sur `rundeck/rundeck` :
+Quand l'amont aura publié ce changement, repasser sur `rundeck/rundeck` :
 retirer l'épinglage, puis `terraform state replace-provider` de
 `registry.terraform.io/Groupe-Hevea/rundeck` vers `registry.terraform.io/rundeck/rundeck`.
 
 ---
 
 ## Unreleased
+
+**Bug Fixes**
+
+### Job Resource
+
+- **Fixed job references taking each other's settings when commands are reordered** - A job reference's `uuid`, `name`, `group_name`, `project_name`, `run_for_each_node` and `node_step` are `Optional` + `Computed` and carried `UseStateForUnknown`. `command` and `error_handler` are list blocks, and `UseStateForUnknown` reads prior state at the same list index: once commands were inserted, removed or moved, any of these attributes left out of the configuration was filled from whichever command used to sit at that position. This is the carry-over 1.5.0 kept `expand_token_in_script_file` clear of; job references still had it.
+
+  Two things followed. A reference naming no project, landing where a reference to another project had been, inherited that `project_name`: the apply succeeded, and the job then failed at run time with `Job [...] not found by name, project: ...`. The same went for `node_step`, and a `run_for_each_node` inherited that way overrode a configured `node_step`, since it takes precedence. And a reference landing where there had been no job reference at all had the two flags planned as `null`, which read back as `false` and failed the apply with `Provider produced inconsistent result after apply`.
+
+  These attributes are now planned from the reference itself.
+
+  - `run_for_each_node` and `node_step` take the value of whichever alias is configured. With neither configured they take the value the provider sends in that case: `false` on a command, `true` on an error handler. That handler default is not new - an unset handler reference has always been sent as a node step, which Rundeck requires under a shell command or a script - but it is now what the plan shows, so removing `node_step = false` from a handler takes effect, and a flag flipped outside Terraform is reported as drift.
+  - For a reference by name, an identification field left out plans as unset, which is how Rundeck stores it (checked against Rundeck 5.8.0, 5.17.0 and 6.2.1). A `uuid`, `group_name` or `project_name` that reached a name-based reference outside Terraform is therefore reported as drift and cleared.
+  - For a reference by `uuid`, the other identification fields are reused from prior state only when it describes the same `uuid`, and are otherwise `(known after apply)`. A field that is not known at apply is no longer sent as an empty string.
+
+  On the first plan after upgrading, a name-based reference or a node-step flag that holds a carried-over value shows a one-time correction. Two cases are not corrected: a `name`, `group_name` or `project_name` carried over onto a reference by `uuid` stays in state as long as that `uuid` stays at the same position, and so does one removed from such a reference's configuration.
+
+## 1.5.0
+
+**Bug Fixes**
+
+### Job Resource
+
+- **Fixed `Provider produced inconsistent result after apply` on script-based commands against Rundeck 6.2.1+** - Rundeck 6.2.1 changed how it serializes a `script_file`/`script_url` command: it now explicitly returns `expandTokenInScriptFile: false` when unset, where earlier versions omitted the field entirely (`inline_script` and plain `exec` commands are unaffected - Rundeck never returns this field for those, in any version). Since `expand_token_in_script_file` was a plain `Optional` (not `Computed`) attribute, a plan of `null` followed by a read-back of `false` was a hard schema-contract violation, not just drift - every apply touching such a command failed outright. Made the attribute `Optional` + `Computed`, matching the same pattern already used for `error_handler`'s `keep_going_on_success` right next to it. Deliberately did **not** add a `UseStateForUnknown` plan modifier alongside `Computed`, unlike that neighboring pattern: `command`/`error_handler` are list blocks, and `UseStateForUnknown` matches prior state to plan by list index - inserting or reordering commands would carry one command's value into another's, silently changing what gets sent to Rundeck. `Computed` alone is sufficient to stop the apply-time error; the only cost is `terraform plan` showing `(known after apply)` for this attribute until it's actually applied. Confirmed this doesn't affect any other optional boolean in the job schema: the same behavior change appears in exactly one other place, `error_handler`'s own copy of `expand_token_in_script_file`, which got the identical fix; a full run of the job resource's acceptance suite against both Rundeck Community and Enterprise 6.2.1 turned up nothing else. Existing configurations are unaffected functionally, but state written before this fix will show a one-time, non-destructive `null` → `false` correction on the next apply, and since that state is now never `null`, `exec` commands will also start sending an explicit `expandTokenInScriptFile: false` in the request payload - confirmed harmless (Rundeck ignores it for non-script commands), but worth knowing if you're diffing API traffic. Known remaining limitation, pre-existing and not introduced by this fix: an `inline_script` command with `expand_token_in_script_file = true` still produces an inconsistent-apply error, since Rundeck never echoes the field back for `inline_script` regardless of value.
 
 **Enhancements**
 
@@ -67,6 +96,20 @@ retirer l'épinglage, puis `terraform state replace-provider` de
   The read-back was changed to match: `group_name` now reads as null when the API returns no group, so a job moved to the project root outside Terraform shows as drift instead of leaving the old group in state forever. `group_name = ""` is rejected at plan time rather than silently behaving as "no group". And an update whose import comes back under a different id — which is what resolution by name rather than by uuid looks like — is now an error naming both jobs, instead of silently pointing state at the duplicate.
 
   **Behaviour change:** a plan that previously showed a job being destroyed and recreated now shows an in-place update. Jobs keep their UUID, so `jobref` references by UUID, `rundeck_webhook.job_id`, and documentation links survive a reorganisation, as does the execution history. Job references written by *name* carry the group they expect and do not follow a move — see the upgrade guide.
+
+### Project Resource
+
+- **Added `runner` block to `resource_model_source`** - Runner selection settings for a resource model source (`resources.source.N.runner.filter`, `runnerFilterMode`, `runnerFilterType`, `providers`, `serviceProvidersFilter`, `checkProviders`) can now be set as first-class attributes (`filter`, `filter_mode`, `filter_type`, `providers`, `service_providers_filter`, `check_providers`) instead of via `extra_config`. When the block is present, all six attributes are required.
+
+  All six keys Rundeck writes under `resources.source.N.runner.*` are mapped deliberately. `readProject` consumes that entire namespace and `updateProjectConfig` rebuilds it from the plan, so any key the block does not represent would be dropped from state on read and then erased server-side on the next apply.
+
+### SCM Resources
+
+- **Added `rundeck_scm_import` and `rundeck_scm_export`** - Manage a project's SCM import/export plugin setup (`git-export`, `git-import`, `svn-export`, `svn-import`, etc.), closing [#76](https://github.com/rundeck/terraform-provider-rundeck/issues/76). `config` is a generic string map (marked `Sensitive`) since the valid keys are plugin-specific and discovered at runtime rather than modeled client-side. Gated at API v15+, since these endpoints ship with core Rundeck rather than Enterprise.
+
+  `enabled` defaults to `true` but is a real `Optional` argument: Rundeck treats enable/disable as an operational toggle rather than ordinary desired-state, so leaving it at the default corrects an out-of-band disable back to enabled on the next apply, while setting it explicitly to `false` has Terraform respect and enforce a disabled state instead.
+
+  These resources only call Rundeck's Setup/Enable API to configure and validate the plugin - they don't trigger an actual SCM action (import/commit/synch), so a target `branch` must already exist on the remote; `createBranch`/`baseBranch` are passed through to Rundeck's plugin config but have no effect via this provider. Triggering SCM actions is tracked as a follow-up in `TODO.md`.
 
 ## 1.4.0
 
